@@ -318,7 +318,7 @@ static int ampire_panel_probe(struct mipi_dsi_device *dsi)
 	return err;
 }
 
-static int ampire_panel_remove(struct mipi_dsi_device *dsi)
+static void ampire_panel_remove(struct mipi_dsi_device *dsi)
 {
 	struct ampire_panel *ampire = mipi_dsi_get_drvdata(dsi);
 	int err;
@@ -338,8 +338,6 @@ static int ampire_panel_remove(struct mipi_dsi_device *dsi)
 			      err);
 
 	ampire_panel_del(ampire);
-
-	return 0;
 }
 
 static void ampire_panel_shutdown(struct mipi_dsi_device *dsi)
