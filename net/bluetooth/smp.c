@@ -853,7 +853,7 @@ static int tk_request(struct l2cap_conn *conn, u8 remote_oob, u8 auth,
 	struct l2cap_chan *chan = conn->smp;
 	struct smp_chan *smp = chan->data;
 	u32 passkey = 0;
-	int ret;
+	int ret = 0;
 
 	/* Initialize key for JUST WORKS */
 	memset(smp->tk, 0, sizeof(smp->tk));
@@ -883,16 +883,9 @@ static int tk_request(struct l2cap_conn *conn, u8 remote_oob, u8 auth,
 	    hcon->io_capability == HCI_IO_NO_INPUT_OUTPUT)
 		smp->method = JUST_WORKS;
 
-	/* If Just Works, Continue with Zero TK and ask user-space for
-	 * confirmation */
+	/* If Just Works, Continue with Zero TK */
 	if (smp->method == JUST_WORKS) {
-		ret = mgmt_user_confirm_request(hcon->hdev, &hcon->dst,
-						hcon->type,
-						hcon->dst_type,
-						passkey, 1);
-		if (ret)
-			return ret;
-		set_bit(SMP_FLAG_WAIT_USER, &smp->flags);
+		set_bit(SMP_FLAG_TK_VALID, &smp->flags);
 		return 0;
 	}
 
