@@ -1,0 +1,67 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+		target = <&spidev1>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@3 {
+		target = <&gpio>;
+		__overlay__ {
+			ethspi_pins: ethspi_pins {
+				brcm,pins = <8 23 25>; /* GPIO8, GPIO23, GPIO25 */
+				brcm,function = <1 0 0>; /* out, in, in */
+				brcm,pull = <0 1 1>; /* none, down, down */
+			};
+		};
+	};
+
+	fragment@4 {
+		target = <&spi0>;
+		__overlay__ {
+			/* needed to avoid dtc warning */
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			status = "okay";
+			pinctrl-0 = <&spi0_pins>;
+			cs-gpios;
+
+			ethspi: ethspi@0 {
+				compatible = "chpt,eth-spi";
+				reg = <0>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&ethspi_pins>;
+
+				spi-max-frequency = <1000000>;
+				interrupt-parent = <&gpio>;
+				interrupts = <23 0x1>;
+				slave-select-gpios = <&rp1_gpio 8 1>;
+				slave-data-gpios = <&rp1_gpio 23 0>;
+				slave-sync-gpios = <&rp1_gpio 25 0>;
+				status = "okay";
+			};
+		};
+	};
+
+};

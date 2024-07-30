@@ -500,12 +500,6 @@ dpi_16bit_gpio2:        &rp1_dpi_16bit_gpio2        { };
 		pins = "gpio1";
 		bias-pull-up;
 	};
-
-	ethspi_sync: ethspi_sync_gpio {
-		function = "gpio";
-		pins = "gpio22", "gpio17", "gpio23";
-		bias-pull-down;
-	};
 };
 
 spi10_pins: &spi10_gpio2 {};
@@ -532,9 +526,23 @@ spi10_cs_pins: &spi10_cs_gpio1 {};
 	status = "disabled";
 };
 
+&spidev1 {
+	status = "disabled";
+};
+
+&gpio {
+	ethspi_pins: ethspi_pins {
+		brcm,pins = <8 23 25>; /* GPIO8, GPIO23, GPIO25 */
+		brcm,function = <1 0 0>; /* out, in, in */
+		brcm,pull = <0 1 1>; /* none, down, down */
+	};
+};
+
 &spi0 {
 	status = "okay";
-	
+	pinctrl-0 = <&spi0_pins>;
+	cs-gpios;
+
 	spidev@0 {
 		status = "disabled";
 	};
@@ -551,9 +559,9 @@ spi10_cs_pins: &spi10_cs_gpio1 {};
 		interrupt-parent = <&gpio>;
 		interrupts = <23 0x1>;
 		spi-max-frequency = <1000000>;
-		slave-select-gpios = <&rp1_gpio 17 GPIO_ACTIVE_LOW>;
-		slave-data-gpios = <&rp1_gpio 24 GPIO_ACTIVE_HIGH>;
-		slave-sync-gpios = <&rp1_gpio 22 GPIO_ACTIVE_HIGH>;
+		slave-select-gpios = <&rp1_gpio 8 GPIO_ACTIVE_LOW>;
+		slave-data-gpios = <&rp1_gpio 23 GPIO_ACTIVE_HIGH>;
+		slave-sync-gpios = <&rp1_gpio 25 GPIO_ACTIVE_HIGH>;
 		status = "okay";
 	};
 };
