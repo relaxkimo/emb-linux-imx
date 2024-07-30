@@ -1,1 +1,4 @@
-make -C /lib/modules/`uname -r`/build M=/home/admin/eth-spi $*
+#!/usr/bin/env bash
+
+set -ex
+make -C /lib/modules/`uname -r`/build M=`pwd` $*

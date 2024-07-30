@@ -1,4 +1,3 @@
-#include "linux/gfp_types.h"
 #include <linux/delay.h>
 #include <linux/skbuff.h>
 #include <linux/if_ether.h>
@@ -24,6 +23,7 @@
 #include <linux/spi/spi.h>
 #include <linux/semaphore.h>
 #include <linux/jiffies.h>
+#include <linux/version.h>
 
 #include "eth_spi_protocol.h"
 
@@ -74,7 +74,6 @@ struct chpt_eth_spi {
     struct eth_spi_frame *tx_frame;
     struct eth_spi_frame *rx_frame;
 
-    u8* rx_buffer;
     struct sk_buff* rx_skb;
 };
 
@@ -92,22 +91,21 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_bu
     gpiod_set_value(espi->slave_select, 1);
     dev_info(&espi->net_dev->dev, "slave select: 1");
     if(down_timeout(&espi->slave_sync_sem, msecs_to_jiffies(100))) {
-        dev_warn(&espi->net_dev->dev, "Slave sync timeout");
+        dev_warn(&espi->net_dev->dev, "slave ack timeout");
     } else {
         dev_info(&espi->net_dev->dev, "slave ack'd sync signal");
     }
 
     gpiod_set_value(espi->slave_select, 0);
 
-    return 0;
-
     spi_message_init(&msg);
 
-    // semaphore ack 
+    // semaphore ack
 
     memcpy(espi->tx_frame->buf, skb->data, skb->len);
 
-    espi->tx_frame->sof = 0x55aa;
+    eth_spi_init_frame(espi->tx_frame, 0, 0, 0);
+    eth_spi_reset_frame(espi->rx_frame);
 
     transfer[0].tx_buf = espi->tx_frame;
     transfer[0].rx_buf = espi->rx_frame;
@@ -117,17 +115,16 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_bu
     spi_message_add_tail(&transfer[0], &msg);
     ret = spi_sync(espi->spi_dev, &msg);
 
-
     gpiod_set_value(espi->slave_select, 0);
 
-    if(ret) {
+    if (ret) {
         return -1;
     }
 
     return 0;
 }
 
-static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi) 
+static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
 {
     u16 packets = 0;
 
@@ -136,6 +133,8 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
         return 0;
 
     while(espi->txr.skb[espi->txr.head]) {
+        u16 new_head;
+
         if(chpt_eth_spi_transceive_frame(espi, espi->txr.skb[espi->txr.head]) == -1) {
             espi->stats.write_err++;
             return -1;
@@ -144,12 +143,12 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
         packets++;
         n_stats->tx_packets++;
         n_stats->tx_bytes += espi->txr.skb[espi->txr.head]->len;
-        
+
         netif_tx_lock_bh(espi->net_dev);
         dev_kfree_skb(espi->txr.skb[espi->txr.head]);
         espi->txr.skb[espi->txr.head] = NULL;
 
-        u16 new_head = espi->txr.head + 1;
+        new_head = espi->txr.head + 1;
         if(new_head >= espi->txr.count)
             new_head = 0;
 
@@ -169,22 +168,26 @@ static int chpt_eth_spi_netdev_init(struct net_device* dev)
     struct chpt_eth_spi* espi = netdev_priv(dev);
 
     dev_info(&espi->spi_dev->dev, "netdev_init");
-    
-    dev->mtu = ETH_SPI_MTU;
+
+    dev->mtu = ETH_DATA_LEN;
     dev->type = ARPHRD_ETHER;
 
     memset(&espi->stats, 0, sizeof(struct eth_spi_stats));
 
     espi->tx_frame = kmalloc(sizeof(struct eth_spi_frame), GFP_KERNEL);
-    espi->rx_frame = kmalloc(sizeof(struct eth_spi_frame), GFP_KERNEL);
-
-    espi->rx_buffer = kmalloc(sizeof(struct eth_spi_frame), GFP_KERNEL);
-    if(!espi->rx_buffer)
+    if(!espi->tx_frame) {
         return -ENOBUFS;
+    }
+    espi->rx_frame = kmalloc(sizeof(struct eth_spi_frame), GFP_KERNEL);
+    if(!espi->rx_frame) {
+        kfree(espi->tx_frame);
+        return -ENOBUFS;
+    }
 
-    espi->rx_skb = netdev_alloc_skb_ip_align(dev, ETH_SPI_MTU + VLAN_ETH_HLEN);
+    espi->rx_skb = netdev_alloc_skb_ip_align(dev, ETH_DATA_LEN + VLAN_ETH_HLEN);
     if(!espi->rx_skb) {
-        kfree(espi->rx_buffer);
+        kfree(espi->tx_frame);
+        kfree(espi->rx_frame);
         netdev_info(espi->net_dev, "Failed to allocation RX sk_buff.\n");
         return -ENOBUFS;
     }
@@ -200,7 +203,6 @@ static void chpt_eth_spi_netdev_uninit(struct net_device* dev)
     kfree(espi->tx_frame);
     kfree(espi->rx_frame);
 
-    kfree(espi->rx_buffer);
     dev_kfree_skb(espi->rx_skb);
 }
 
@@ -211,10 +213,9 @@ static int chpt_eth_spi_thread(void* data)
 
     while(!kthread_should_stop()) {
         set_current_state(TASK_INTERRUPTIBLE);
-        if((espi->intr_req != espi->intr_svc) && !espi->txr.skb[espi->txr.head])
+        if((espi->intr_req != espi->intr_svc) && !espi->txr.skb[espi->txr.head]) {
             schedule();
-        
-        
+        }
 
         set_current_state(TASK_RUNNING);
 
@@ -233,7 +234,7 @@ static int chpt_eth_spi_thread(void* data)
 static irqreturn_t eth_spi_intr_handler(int irq, void* data)
 {
     struct chpt_eth_spi* espi = data;
-    
+
     if(espi->spi_thread)
         wake_up_process(espi->spi_thread);
 
@@ -242,17 +243,17 @@ static irqreturn_t eth_spi_intr_handler(int irq, void* data)
 
 static int chpt_eth_spi_netdev_open(struct net_device* dev)
 {
+    int ret;
+
     struct chpt_eth_spi* espi = netdev_priv(dev);
     dev_info(&espi->spi_dev->dev, "netdev_open");
-
-    int ret = 0;
 
     espi->intr_req = 1;
     espi->intr_svc = 0;
 
     espi->spi_thread = kthread_run(chpt_eth_spi_thread, espi, "%s", dev->name);
     if(IS_ERR(espi->spi_thread)) {
-        netdev_err(dev, "%s: unable to start kernel thread.\n", ETH_SPI_DRV_NAME); 
+        netdev_err(dev, "%s: unable to start kernel thread.\n", ETH_SPI_DRV_NAME);
         return PTR_ERR(espi->spi_thread);
     }
 
@@ -294,9 +295,10 @@ static int chpt_eth_spi_ring_has_space(struct tx_ring* txr)
 
 static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_device* dev)
 {
+    u16 new_tail;
+
     struct chpt_eth_spi* espi = netdev_priv(dev);
     dev_info(&espi->spi_dev->dev, "netdev_xmit");
-
 
     if(espi->txr.skb[espi->txr.tail]) {
         netdev_warn(espi->net_dev, "queue was unexpectedly full!\n");
@@ -307,7 +309,7 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_devi
 
     netdev_dbg(espi->net_dev, "Tx-ing packet: Size: 0x%08x\n", skb->len);
 
-    u16 new_tail = espi->txr.tail + 1;
+    new_tail = espi->txr.tail + 1;
     if(new_tail >= espi->txr.count)
         new_tail = 0;
 
@@ -358,13 +360,13 @@ static void chpt_eth_spi_netdev_setup(struct net_device *dev) {
 
     dev->netdev_ops = &chpt_eth_spi_netdev_ops;
     dev->ethtool_ops = &chpt_eth_spi_ethtool_ops;
-    //
+
     dev->watchdog_timeo = 250;
     dev->priv_flags &= ~IFF_TX_SKB_SHARING;
     dev->tx_queue_len = 100;
 
-    dev->min_mtu = ETH_SPI_MTU;
-    dev->max_mtu = ETH_SPI_MTU;
+    dev->min_mtu = ETH_MIN_MTU;
+    dev->max_mtu = ETH_SPI_MAX_MTU;
 
     espi = netdev_priv(dev);
     memset(espi, 0, sizeof(*espi));
@@ -388,8 +390,10 @@ static irqreturn_t espi_slave_sync_handler(int irq, void* data)
 
 static int chpt_eth_spi_probe(struct spi_device* spi)
 {
+    int ret;
     struct chpt_eth_spi *espi = NULL;
     struct net_device* espi_netdev = NULL;
+    struct pinctrl* pinctrl;
 
     dev_info(&spi->dev, "Probing ChargePoint Eth SPI device...");
 
@@ -397,7 +401,7 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
         dev_err(&spi->dev, "Missing device tree\n");
         return -EINVAL;
     }
-    
+
     if(eth_spi_clkspeed == 0) {
         if(spi->max_speed_hz)
             eth_spi_clkspeed = spi->max_speed_hz;
@@ -405,7 +409,7 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
             eth_spi_clkspeed = ETH_SPI_CLK_SPEED;
     }
 
-    if((eth_spi_clkspeed < ETH_SPI_CLK_SPEED_MIN) || 
+    if((eth_spi_clkspeed < ETH_SPI_CLK_SPEED_MIN) ||
     (eth_spi_clkspeed > ETH_SPI_CLK_SPEED_MAX)) {
         dev_err(&spi->dev, "Invalid clkspeed: %d\n", eth_spi_clkspeed);
         return -EINVAL;
@@ -426,7 +430,7 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
 
     chpt_eth_spi_netdev_setup(espi_netdev);
     espi = netdev_priv(espi_netdev);
-    
+
     espi->slave_data = devm_gpiod_get(&spi->dev, "slave-data", 0);
     espi->slave_sync = devm_gpiod_get(&spi->dev, "slave-sync", 0);
     espi->slave_select = devm_gpiod_get(&spi->dev, "slave-select", 0);
@@ -434,7 +438,7 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     dev_info(&spi->dev, "slave_data: %p", espi->slave_data);
     dev_info(&spi->dev, "slave_sync: %p", espi->slave_sync);
     dev_info(&spi->dev, "slave_select: %p", espi->slave_select);
-	struct pinctrl* pinctrl = devm_pinctrl_get_select_default(&spi->dev);
+    pinctrl = devm_pinctrl_get_select_default(&spi->dev);
     dev_info(&spi->dev, "pinctrl default: %d", IS_ERR(pinctrl));
     gpiod_direction_input(espi->slave_sync);
     gpiod_direction_input(espi->slave_data);
@@ -452,7 +456,7 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
 
     spi_set_drvdata(spi, espi_netdev);
 
-    int ret = of_get_ethdev_address(spi->dev.of_node, espi->net_dev);
+    ret = of_get_ethdev_address(spi->dev.of_node, espi->net_dev);
     if(ret) {
         eth_hw_addr_random(espi->net_dev);
         dev_info(&spi->dev, "Using random MAC address: %pM\n", espi->net_dev->dev_addr);
@@ -472,7 +476,11 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     return 0;
 }
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,0,0)
+static int chpt_eth_spi_remove(struct spi_device* spi)
+#else
 static void chpt_eth_spi_remove(struct spi_device* spi)
+#endif
 {
     struct net_device* espi_devs = spi_get_drvdata(spi);
     //struct chpt_eth_spi* espi = netdev_priv(espi_devs);
@@ -481,7 +489,9 @@ static void chpt_eth_spi_remove(struct spi_device* spi)
     //
     unregister_netdev(espi_devs);
     free_netdev(espi_devs);
-
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,0,0)
+    return 0;
+#endif
 }
 
 static const struct spi_device_id chpt_eth_spi_id[] = {
