@@ -114,17 +114,24 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_bu
     ret = spi_sync(espi->spi_dev, &msg);
 
     // optional: wait for slave_sync to go low
-    if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(100)) == 0) {
+    if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(10)) == 0) {
         dev_warn(&espi->net_dev->dev, "slave ack timeout");
     } else {
-        dev_info(&espi->net_dev->dev, "slave ready");
+        dev_info(&espi->net_dev->dev, "slave done");
     }
 
-
     gpiod_set_value(espi->slave_select, 0);
-    dev_info(&espi->net_dev->dev, "slave select: 0");
+    dev_dbg(&espi->net_dev->dev, "slave select: 0");
 
     if (ret) {
+        dev_warn(&espi->net_dev->dev, "spi transfer failed");
+        return -1;
+    }
+
+    if (eth_spi_frame_valid(espi->rx_frame)) {
+        dev_dbg(&espi->net_dev->dev, "frame valid");
+    } else {
+        dev_warn(&espi->net_dev->dev, "invalid frame");
         return -1;
     }
 
@@ -135,7 +142,10 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
 {
     struct net_device_stats *n_stats = &espi->net_dev->stats;
 
-    chpt_eth_spi_transceive_frame(espi, NULL);
+    while (espi->txr.skb[espi->txr.head] || gpiod_get_value(espi->slave_data)) {
+        // transceive as long as we have data to send or the slave has data ready
+        chpt_eth_spi_transceive_frame(espi, NULL);
+    }
     return 0;
 
     while (espi->txr.skb[espi->txr.head]) {
@@ -218,18 +228,33 @@ static int chpt_eth_spi_thread(void* data)
     netdev_info(espi->net_dev, "SPI thread created\n");
 
     while(!kthread_should_stop()) {
-        /*
         set_current_state(TASK_INTERRUPTIBLE);
-        if((espi->intr_req != espi->intr_svc) && !espi->txr.skb[espi->txr.head]) {
+        if((espi->intr_req == espi->intr_svc) && !espi->txr.skb[espi->txr.head]) {
+            // no intr to serve and no skb to send
             schedule();
         }
 
         set_current_state(TASK_RUNNING);
 
-        netdev_info(espi->net_dev, "have work to do. int: , tx_skb: %p\n", espi->txr.skb[espi->txr.head]);
-        */
-        chpt_eth_spi_transceive(espi);
-        msleep(500);
+        netdev_dbg(espi->net_dev, "have work to do. int: %d, tx_skb: %p\n",
+            espi->intr_req - espi->intr_svc,
+            espi->txr.skb[espi->txr.head]);
+
+        if (!netif_carrier_ok(espi->net_dev)) {
+            if (chpt_eth_spi_transceive_frame(espi, NULL)) {
+                // failed to sync
+                msleep(500); // wait for retry
+            } else {
+                // sync ready
+                netif_wake_queue(espi->net_dev);
+                netif_carrier_on(espi->net_dev);
+            }
+        }
+
+        if (netif_carrier_ok(espi->net_dev)) {
+            espi->intr_svc = espi->intr_req;
+            chpt_eth_spi_transceive(espi);
+        }
     }
 
     set_current_state(TASK_RUNNING);
@@ -242,6 +267,7 @@ static irqreturn_t eth_spi_intr_handler(int irq, void* data)
 {
     struct chpt_eth_spi* espi = data;
 
+    espi->intr_req++;
     if(espi->spi_thread)
         wake_up_process(espi->spi_thread);
 
@@ -271,8 +297,6 @@ static int chpt_eth_spi_netdev_open(struct net_device* dev)
         return ret;
     }
 
-    netif_carrier_on(dev);
-
     return 0;
 }
 
@@ -283,12 +307,13 @@ static int chpt_eth_spi_netdev_stop(struct net_device* dev)
 
     netif_stop_queue(dev);
 
+    // TODO sync free_irq
     free_irq(espi->spi_dev->irq, espi);
 
     kthread_stop(espi->spi_thread);
     espi->spi_thread = NULL;
 
-    // flush rx_ring.
+    // TODO flush rx_ring.
     return 0;
 }
 
@@ -413,10 +438,11 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     }
 
     if(eth_spi_clkspeed == 0) {
-        if(spi->max_speed_hz)
+        if(spi->max_speed_hz) {
             eth_spi_clkspeed = spi->max_speed_hz;
-        else
+        } else {
             eth_spi_clkspeed = ETH_SPI_CLK_SPEED;
+        }
     }
 
     if((eth_spi_clkspeed < ETH_SPI_CLK_SPEED_MIN) ||
@@ -442,7 +468,7 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     espi = netdev_priv(espi_netdev);
 
     espi->slave_data = devm_gpiod_get(&spi->dev, "slave-data", 0);
-    espi->slave_sync = devm_gpiod_get(&spi->dev, "slave-sync", 0);
+    espi->slave_sync = devm_gpiod_get(&spi->dev, "slave-sync", 0); // slave sync gpio not used (only as interrupt source)
     espi->slave_select = devm_gpiod_get(&spi->dev, "slave-select", 0);
 
     dev_info(&spi->dev, "slave_data: %p", espi->slave_data);
@@ -454,7 +480,7 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     gpiod_direction_input(espi->slave_data);
     gpiod_direction_output(espi->slave_select, 0);
 
-    /* CHECK: is IRQF_TRIGGER_* required as it's define in DT */
+    /* CHECK: is IRQF_TRIGGER_* is required as it's define in DT */
     if(request_irq(gpiod_to_irq(espi->slave_sync), espi_slave_sync_handler, IRQF_SHARED | IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, ETH_SPI_DRV_NAME, espi)) {
         dev_err(&spi->dev, "Failed to request_irq: slave_sync");
     }
@@ -486,9 +512,10 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     return 0;
 }
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,0,0)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,18,0)
 static int chpt_eth_spi_remove(struct spi_device* spi)
 #else
+// make remove callback a void function: a0386bba70934d42f586eaf68b21d5eeaffa7bd0
 static void chpt_eth_spi_remove(struct spi_device* spi)
 #endif
 {
@@ -499,7 +526,7 @@ static void chpt_eth_spi_remove(struct spi_device* spi)
     //
     unregister_netdev(espi_devs);
     free_netdev(espi_devs);
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(6,0,0)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,18,0)
     return 0;
 #endif
 }
