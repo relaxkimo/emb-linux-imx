@@ -24,6 +24,7 @@
 #include <linux/semaphore.h>
 #include <linux/jiffies.h>
 #include <linux/version.h>
+#include <linux/completion.h>
 
 #include "eth_spi_protocol.h"
 
@@ -64,7 +65,7 @@ struct chpt_eth_spi {
     struct gpio_desc* slave_data;
     struct gpio_desc* slave_sync;
 
-    struct semaphore slave_sync_sem;
+    struct completion slave_sync_comp;
 
     unsigned int intr_req;
     unsigned int intr_svc;
@@ -77,45 +78,43 @@ struct chpt_eth_spi {
     struct sk_buff* rx_skb;
 };
 
-static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_buff* skb)
+static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_buff* skb2)
 {
     struct spi_message msg;
-    struct spi_transfer transfer[1];
+    struct spi_transfer transfer = {
+            .tx_buf = espi->tx_frame,
+            .rx_buf = espi->rx_frame,
+            .len = sizeof(struct eth_spi_frame),
+    };
     int ret;
 
-    memset(&transfer, 0, sizeof(transfer));
+    reinit_completion(&espi->slave_sync_comp);
 
-    // Ensure semaphore is reset!
-    //up(&espi->slave_sync_sem);
-    sema_init(&espi->slave_sync_sem, 0);
     gpiod_set_value(espi->slave_select, 1);
     dev_info(&espi->net_dev->dev, "slave select: 1");
-    if(down_timeout(&espi->slave_sync_sem, msecs_to_jiffies(100))) {
+    if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(100)) == 0) {
         dev_warn(&espi->net_dev->dev, "slave ack timeout");
     } else {
-        dev_info(&espi->net_dev->dev, "slave ack'd sync signal");
+        dev_info(&espi->net_dev->dev, "slave ready");
     }
-
-    gpiod_set_value(espi->slave_select, 0);
 
     spi_message_init(&msg);
 
-    // semaphore ack
+    //memcpy(espi->tx_frame->buf, skb->data, skb->len);
 
-    memcpy(espi->tx_frame->buf, skb->data, skb->len);
-
+    memset(espi->tx_frame->buf, 0, ETH_SPI_FRAG_LEN);
     eth_spi_init_frame(espi->tx_frame, 0, 0, 0);
     eth_spi_reset_frame(espi->rx_frame);
 
-    transfer[0].tx_buf = espi->tx_frame;
-    transfer[0].rx_buf = espi->rx_frame;
-    transfer[0].len = sizeof(*espi->tx_frame);
-    netdev_info(espi->net_dev, "tx_frame: %d", skb->len);
+    //netdev_info(espi->net_dev, "tx_frame: %d", skb->len);
 
-    spi_message_add_tail(&transfer[0], &msg);
+    spi_message_add_tail(&transfer, &msg);
     ret = spi_sync(espi->spi_dev, &msg);
 
+    // optional: wait for slave_sync to go low
+
     gpiod_set_value(espi->slave_select, 0);
+    dev_info(&espi->net_dev->dev, "slave select: 0");
 
     if (ret) {
         return -1;
@@ -126,13 +125,12 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_bu
 
 static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
 {
-    u16 packets = 0;
-
     struct net_device_stats *n_stats = &espi->net_dev->stats;
-    if(espi->txr.skb[espi->txr.head] == NULL)
-        return 0;
 
-    while(espi->txr.skb[espi->txr.head]) {
+    chpt_eth_spi_transceive_frame(espi, NULL);
+    return 0;
+
+    while (espi->txr.skb[espi->txr.head]) {
         u16 new_head;
 
         if(chpt_eth_spi_transceive_frame(espi, espi->txr.skb[espi->txr.head]) == -1) {
@@ -140,7 +138,6 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
             return -1;
         }
 
-        packets++;
         n_stats->tx_packets++;
         n_stats->tx_bytes += espi->txr.skb[espi->txr.head]->len;
 
@@ -149,8 +146,9 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
         espi->txr.skb[espi->txr.head] = NULL;
 
         new_head = espi->txr.head + 1;
-        if(new_head >= espi->txr.count)
+        if(new_head >= espi->txr.count) {
             new_head = 0;
+        }
 
         espi->txr.head = new_head;
 
@@ -212,6 +210,7 @@ static int chpt_eth_spi_thread(void* data)
     netdev_info(espi->net_dev, "SPI thread created\n");
 
     while(!kthread_should_stop()) {
+        /*
         set_current_state(TASK_INTERRUPTIBLE);
         if((espi->intr_req != espi->intr_svc) && !espi->txr.skb[espi->txr.head]) {
             schedule();
@@ -220,7 +219,7 @@ static int chpt_eth_spi_thread(void* data)
         set_current_state(TASK_RUNNING);
 
         netdev_info(espi->net_dev, "have work to do. int: , tx_skb: %p\n", espi->txr.skb[espi->txr.head]);
-
+        */
         chpt_eth_spi_transceive(espi);
         msleep(500);
     }
@@ -295,6 +294,9 @@ static int chpt_eth_spi_ring_has_space(struct tx_ring* txr)
 
 static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_device* dev)
 {
+    netif_trans_update(dev);
+
+    return NETDEV_TX_OK;
     u16 new_tail;
 
     struct chpt_eth_spi* espi = netdev_priv(dev);
@@ -383,7 +385,7 @@ static irqreturn_t espi_slave_sync_handler(int irq, void* data)
 {
     struct chpt_eth_spi* espi = data;
 
-    down(&espi->slave_sync_sem);
+    complete(&espi->slave_sync_comp);
 
     return IRQ_HANDLED;
 }
@@ -445,11 +447,10 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     gpiod_direction_output(espi->slave_select, 0);
 
     if(request_irq(gpiod_to_irq(espi->slave_sync), espi_slave_sync_handler, IRQF_SHARED | IRQF_TRIGGER_RISING, ETH_SPI_DRV_NAME, espi)) {
-        dev_err(&spi->dev, "Failed to request_irq: slave_data_ready");
-
+        dev_err(&spi->dev, "Failed to request_irq: slave_sync");
     }
 
-    sema_init(&espi->slave_sync_sem, 1);
+    init_completion(&espi->slave_sync_comp);
 
     espi->net_dev = espi_netdev;
     espi->spi_dev = spi;
