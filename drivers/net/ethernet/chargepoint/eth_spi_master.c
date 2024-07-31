@@ -91,11 +91,11 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_bu
     reinit_completion(&espi->slave_sync_comp);
 
     gpiod_set_value(espi->slave_select, 1);
-    dev_info(&espi->net_dev->dev, "slave select: 1");
+    dev_dbg(&espi->net_dev->dev, "slave select: 1");
     if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(100)) == 0) {
         dev_warn(&espi->net_dev->dev, "slave ack timeout");
     } else {
-        dev_info(&espi->net_dev->dev, "slave ready");
+        dev_dbg(&espi->net_dev->dev, "slave ready");
     }
 
     spi_message_init(&msg);
@@ -109,9 +109,17 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi, struct sk_bu
     //netdev_info(espi->net_dev, "tx_frame: %d", skb->len);
 
     spi_message_add_tail(&transfer, &msg);
+
+    reinit_completion(&espi->slave_sync_comp);
     ret = spi_sync(espi->spi_dev, &msg);
 
     // optional: wait for slave_sync to go low
+    if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(100)) == 0) {
+        dev_warn(&espi->net_dev->dev, "slave ack timeout");
+    } else {
+        dev_info(&espi->net_dev->dev, "slave ready");
+    }
+
 
     gpiod_set_value(espi->slave_select, 0);
     dev_info(&espi->net_dev->dev, "slave select: 0");
@@ -446,7 +454,8 @@ static int chpt_eth_spi_probe(struct spi_device* spi)
     gpiod_direction_input(espi->slave_data);
     gpiod_direction_output(espi->slave_select, 0);
 
-    if(request_irq(gpiod_to_irq(espi->slave_sync), espi_slave_sync_handler, IRQF_SHARED | IRQF_TRIGGER_RISING, ETH_SPI_DRV_NAME, espi)) {
+    /* CHECK: is IRQF_TRIGGER_* required as it's define in DT */
+    if(request_irq(gpiod_to_irq(espi->slave_sync), espi_slave_sync_handler, IRQF_SHARED | IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, ETH_SPI_DRV_NAME, espi)) {
         dev_err(&spi->dev, "Failed to request_irq: slave_sync");
     }
 

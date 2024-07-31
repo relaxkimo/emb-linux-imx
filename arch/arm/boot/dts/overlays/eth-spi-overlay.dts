@@ -55,7 +55,7 @@
 
 				spi-max-frequency = <1000000>;
 				interrupt-parent = <&gpio>;
-				interrupts = <23 0x1>;
+				interrupts = <23 0x1>, <25 0x3>;
 				slave-select-gpios = <&rp1_gpio 8 1>;
 				slave-data-gpios = <&rp1_gpio 23 0>;
 				slave-sync-gpios = <&rp1_gpio 25 0>;
