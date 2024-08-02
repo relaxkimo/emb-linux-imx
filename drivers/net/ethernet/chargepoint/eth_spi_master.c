@@ -92,11 +92,11 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi)
     reinit_completion(&espi->slave_sync_comp);
 
     gpiod_set_value(espi->slave_select, 1);
-    dev_dbg(&espi->net_dev->dev, "slave select: 1");
+    netdev_dbg(espi->net_dev, "slave select: 1");
     if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(100)) == 0) {
-        dev_warn(&espi->net_dev->dev, "slave ack timeout");
+        netdev_warn(espi->net_dev, "slave ack timeout");
     } else {
-        dev_dbg(&espi->net_dev->dev, "slave ready");
+        netdev_dbg(espi->net_dev, "slave ready");
     }
 
     spi_message_init(&msg);
@@ -109,28 +109,28 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi)
     ret = spi_sync(espi->spi_dev, &msg);
 
     if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(10)) == 0) {
-        dev_warn(&espi->net_dev->dev, "slave ack timeout");
+        netdev_warn(espi->net_dev, "slave ack timeout");
     } else {
-        dev_info(&espi->net_dev->dev, "slave done");
+        netdev_dbg(espi->net_dev, "slave done");
     }
 
     gpiod_set_value(espi->slave_select, 0);
-    dev_dbg(&espi->net_dev->dev, "slave select: 0");
+    netdev_dbg(espi->net_dev, "slave select: 0");
     usleep_range(20, 100);
 
     if (ret) {
-        dev_warn(&espi->net_dev->dev, "spi transfer failed");
+        netdev_warn(espi->net_dev, "spi transfer failed");
         return -1;
     }
 
     if (eth_spi_frame_valid(espi->rx_frame)) {
-        dev_dbg(&espi->net_dev->dev, "rx frame valid %d/%d (len=%d)",
+        netdev_dbg(espi->net_dev, "rx frame valid %d/%d (len=%d)",
             espi->rx_frame->frag_idx+1,
             espi->rx_frame->frag_tot+1,
             eth_spi_frame_len(espi->rx_frame));
         if (espi->rx_frame->frag_idx == 0) {
             // first frame
-            espi->rx_skb = netdev_alloc_skb_ip_align(espi->net_dev, espi->rx_frame->frag_tot+1 * ETH_SPI_FRAG_LEN);
+            espi->rx_skb = netdev_alloc_skb_ip_align(espi->net_dev, (espi->rx_frame->frag_tot + 1) * ETH_SPI_FRAG_LEN);
             if (!espi->rx_skb) {
                 netdev_dbg(espi->net_dev, "out of RX resources\n");
                 espi->stats.out_of_mem++;
@@ -159,7 +159,7 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi)
         }
 
     } else {
-        dev_warn(&espi->net_dev->dev, "invalid frame");
+        netdev_warn(espi->net_dev, "invalid frame");
         return -1;
     }
 
@@ -203,8 +203,9 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
             }
 
             espi->txr.head = new_head;
-            if(netif_queue_stopped(espi->net_dev))
+            if(netif_queue_stopped(espi->net_dev)) {
                 netif_wake_queue(espi->net_dev);
+            }
 
             netif_tx_unlock_bh(espi->net_dev);
         } else {
@@ -224,7 +225,7 @@ static int chpt_eth_spi_netdev_init(struct net_device* dev)
 {
     struct chpt_eth_spi* espi = netdev_priv(dev);
 
-    dev_info(&espi->spi_dev->dev, "netdev_init");
+    netdev_info(espi->net_dev, "netdev_init");
 
     dev->mtu = ETH_DATA_LEN;
     dev->type = ARPHRD_ETHER;
@@ -249,7 +250,7 @@ static int chpt_eth_spi_netdev_init(struct net_device* dev)
 static void chpt_eth_spi_netdev_uninit(struct net_device* dev)
 {
     struct chpt_eth_spi* espi = netdev_priv(dev);
-    dev_info(&espi->spi_dev->dev, "netdev_uninit");
+    netdev_info(espi->net_dev, "netdev_uninit");
 
     kfree(espi->tx_frame);
     kfree(espi->rx_frame);
@@ -261,9 +262,6 @@ static int chpt_eth_spi_thread(void* data)
 {
     struct chpt_eth_spi* espi = data;
     netdev_info(espi->net_dev, "SPI thread created\n");
-    // TODO clean logging
-    dev_info(&espi->net_dev->dev, "SPI thread created\n");
-    dev_info(&espi->spi_dev->dev, "SPI thread created\n");
 
     while(!kthread_should_stop()) {
         set_current_state(TASK_INTERRUPTIBLE);
@@ -328,7 +326,7 @@ static int chpt_eth_spi_netdev_open(struct net_device* dev)
     int ret;
 
     struct chpt_eth_spi* espi = netdev_priv(dev);
-    dev_info(&espi->spi_dev->dev, "netdev_open");
+    netdev_info(espi->net_dev, "netdev_open");
 
     espi->intr_req = 1;
     espi->intr_svc = 0;
@@ -358,7 +356,7 @@ static int chpt_eth_spi_netdev_open(struct net_device* dev)
 static int chpt_eth_spi_netdev_stop(struct net_device* dev)
 {
     struct chpt_eth_spi* espi = netdev_priv(dev);
-    dev_info(&espi->spi_dev->dev, "netdev_stop");
+    netdev_info(espi->net_dev, "netdev_stop");
 
     netif_stop_queue(dev);
 
@@ -385,7 +383,7 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_devi
     u16 new_tail;
 
     struct chpt_eth_spi* espi = netdev_priv(dev);
-    dev_info(&espi->spi_dev->dev, "netdev_xmit");
+    netdev_dbg(espi->net_dev, "netdev_xmit");
 
     if(espi->txr.skb[espi->txr.tail]) {
         netdev_warn(espi->net_dev, "queue was unexpectedly full!\n");
@@ -421,7 +419,7 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_devi
 static void chpt_eth_spi_netdev_tx_timeout(struct net_device* dev, unsigned int txqueue)
 {
     struct chpt_eth_spi* espi = netdev_priv(dev);
-    dev_info(&espi->spi_dev->dev, "netdev_tx_timeout");
+    netdev_info(espi->net_dev, "netdev_tx_timeout");
 
     if(espi->spi_thread)
         wake_up_process(espi->spi_thread);
