@@ -41,7 +41,6 @@ MODULE_PARM_DESC(eth_spi_clkspeed,
 		 "SPI bus clock speed (Hz) (1000000 - 25000000).");
 
 struct eth_spi_stats {
-	u64 reset_timeout;
 	u64 spi_err;
 	u64 ring_full;
 	u64 read_err;
@@ -107,6 +106,10 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi *espi)
 
 	reinit_completion(&espi->slave_sync_comp);
 	ret = spi_sync(espi->spi_dev, &msg);
+	if (ret || (msg.actual_length != transfer.len)) {
+		netdev_err(espi->net_dev, "spi error %d\n", ret);
+		espi->stats.spi_err++;
+	}
 
 	if (wait_for_completion_interruptible_timeout(
 		    &espi->slave_sync_comp, msecs_to_jiffies(10)) == 0) {
@@ -408,7 +411,7 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff *skb,
 		espi->stats.ring_full++;
 	}
 
-	netif_trans_update(dev);
+	netif_trans_update(dev); /* prevent tx timeout */
 
 	if (espi->spi_thread) {
 		wake_up_process(espi->spi_thread);
@@ -485,7 +488,6 @@ static const struct net_device_ops chpt_eth_spi_netdev_ops = {
  */
 /* clang-format off */
 static const char eth_spi_gstrings_stats[][ETH_GSTRING_LEN] = {
-	"Reset timeouts",
 	"SPI errors",
 	"Transmit ring full",
 	"Read errors",
@@ -542,7 +544,6 @@ static void chpt_eth_spi_netdev_setup(struct net_device *dev)
 	dev->netdev_ops = &chpt_eth_spi_netdev_ops;
 	dev->ethtool_ops = &chpt_eth_spi_ethtool_ops;
 	dev->watchdog_timeo = ETH_SPI_TX_TIMEOUT;
-	dev->priv_flags &= ~IFF_TX_SKB_SHARING;
 	dev->tx_queue_len = 100;
 
 	dev->min_mtu = ETH_MIN_MTU;
@@ -552,10 +553,12 @@ static void chpt_eth_spi_netdev_setup(struct net_device *dev)
 	memset(espi, 0, sizeof(*espi));
 };
 
+/* clang-format off */
 static const struct of_device_id chpt_eth_spi_of_match[] = {
 	{ .compatible = "chpt,eth-spi" },
 	{ /* sentinel */ }
 };
+/* clang-format on */
 MODULE_DEVICE_TABLE(of, chpt_eth_spi_of_match);
 
 static int chpt_eth_spi_probe(struct spi_device *spi)
