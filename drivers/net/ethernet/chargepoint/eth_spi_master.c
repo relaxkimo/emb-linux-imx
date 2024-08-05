@@ -1,5 +1,6 @@
 #include <linux/delay.h>
 #include <linux/skbuff.h>
+#include <linux/circ_buf.h>
 #include <linux/if_ether.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -29,8 +30,7 @@
 #include "eth_spi_protocol.h"
 
 #define ETH_SPI_DRV_NAME    "chpt-eth-spi"
-#define TX_RING_MAX_LEN     10
-#define TX_RING_MIN_LEN     2
+#define TX_RING_NUM     16 /* power-of-2 */
 
 #define ETH_SPI_CLK_SPEED_MIN   (1000000u)
 #define ETH_SPI_CLK_SPEED_MAX   (25000000u)
@@ -48,11 +48,9 @@ struct eth_spi_stats {
 };
 
 struct tx_ring {
-    struct sk_buff *skb[TX_RING_MAX_LEN];
-    u16 head;
-    u16 tail;
-    u16 size;
-    u16 count;
+    struct sk_buff *skb[TX_RING_NUM];
+    u16 head; /* write index (producer) */
+    u16 tail; /* read index (consumer) */
 };
 
 struct chpt_eth_spi {
@@ -182,14 +180,13 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
 {
     struct net_device_stats *n_stats = &espi->net_dev->stats;
 
-    while (espi->txr.skb[espi->txr.head] || gpiod_get_value(espi->slave_data)) {
+    while (CIRC_CNT(espi->txr.head, espi->txr.tail, TX_RING_NUM) || gpiod_get_value(espi->slave_data)) {
         // transceive as long as we have data to send or the slave has data ready
 
-        if (espi->txr.skb[espi->txr.head]) {
+        if (CIRC_CNT(espi->txr.head, espi->txr.tail, TX_RING_NUM) > 0) {
             // data to send
-            u16 new_head;
             u8 frag_idx;
-            struct sk_buff *skb = espi->txr.skb[espi->txr.head];
+            struct sk_buff *skb = espi->txr.skb[espi->txr.tail];
 
             u8 frag_tot = ((skb->len - 1u) / ETH_SPI_FRAG_LEN) + 1u;
             for (frag_idx = 0; frag_idx < frag_tot; frag_idx++) {
@@ -203,23 +200,15 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
                 }
             }
             n_stats->tx_packets++;
-            n_stats->tx_bytes += espi->txr.skb[espi->txr.head]->len;
+            n_stats->tx_bytes += espi->txr.skb[espi->txr.tail]->len;
 
-            netif_tx_lock_bh(espi->net_dev);
-            dev_kfree_skb(espi->txr.skb[espi->txr.head]);
-            espi->txr.skb[espi->txr.head] = NULL;
+            dev_kfree_skb(espi->txr.skb[espi->txr.tail]);
+            espi->txr.skb[espi->txr.tail] = NULL;
+            espi->txr.tail = ((espi->txr.tail + 1) & (TX_RING_NUM - 1));
 
-            new_head = espi->txr.head + 1;
-            if(new_head >= espi->txr.count) {
-                new_head = 0;
-            }
-
-            espi->txr.head = new_head;
-            if(netif_queue_stopped(espi->net_dev)) {
+            if (netif_queue_stopped(espi->net_dev)) {
                 netif_wake_queue(espi->net_dev);
             }
-
-            netif_tx_unlock_bh(espi->net_dev);
         } else {
             // no date to send, receive only
             memset(espi->tx_frame->buf, 0, ETH_SPI_FRAG_LEN);
@@ -277,7 +266,7 @@ static int chpt_eth_spi_thread(void* data)
 
     while(!kthread_should_stop()) {
         set_current_state(TASK_INTERRUPTIBLE);
-        if((espi->intr_req == espi->intr_svc) && !espi->txr.skb[espi->txr.head]) {
+        if((espi->intr_req == espi->intr_svc) && !CIRC_CNT(espi->txr.head, espi->txr.tail, TX_RING_NUM)) {
             // no intr to serve and no skb to send
             schedule();
         }
@@ -286,7 +275,7 @@ static int chpt_eth_spi_thread(void* data)
 
         netdev_dbg(espi->net_dev, "have work to do. int: %d, tx_skb: %p\n",
             espi->intr_req - espi->intr_svc,
-            espi->txr.skb[espi->txr.head]);
+            espi->txr.skb[espi->txr.tail]);
 
         if (!netif_carrier_ok(espi->net_dev)) {
             memset(espi->tx_frame->buf, 0, ETH_SPI_FRAG_LEN);
@@ -382,22 +371,12 @@ static int chpt_eth_spi_netdev_stop(struct net_device* dev)
     return 0;
 }
 
-static int chpt_eth_spi_ring_has_space(struct tx_ring* txr)
-{
-    if(txr->skb[txr->tail])
-        return 0;
-
-    return 1;
-}
-
 static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_device* dev)
 {
-    u16 new_tail;
-
     struct chpt_eth_spi* espi = netdev_priv(dev);
     netdev_vdbg(espi->net_dev, "netdev_xmit");
 
-    if(espi->txr.skb[espi->txr.tail]) {
+    if (CIRC_SPACE(espi->txr.head, espi->txr.tail, TX_RING_NUM) == 0) {
         netdev_warn(espi->net_dev, "queue was unexpectedly full!\n");
         netif_stop_queue(espi->net_dev);
         espi->stats.ring_full++;
@@ -406,14 +385,10 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_devi
 
     netdev_dbg(espi->net_dev, "Tx-ing packet: Size: %d\n", skb->len);
 
-    new_tail = espi->txr.tail + 1;
-    if(new_tail >= espi->txr.count)
-        new_tail = 0;
+    espi->txr.skb[espi->txr.head] = skb;
+    espi->txr.head = (espi->txr.head + 1) & (TX_RING_NUM - 1);
 
-    espi->txr.skb[espi->txr.tail] = skb;
-    espi->txr.tail = new_tail;
-
-    if(!chpt_eth_spi_ring_has_space(&espi->txr)) {
+    if (CIRC_SPACE(espi->txr.head, espi->txr.tail, TX_RING_NUM) == 0) {
         netdev_info(espi->net_dev, "TXring is full!");
         netif_stop_queue(espi->net_dev);
         espi->stats.ring_full++;
@@ -421,9 +396,9 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_devi
 
     netif_trans_update(dev);
 
-    if(espi->spi_thread)
+    if (espi->spi_thread) {
         wake_up_process(espi->spi_thread);
-
+    }
 
     return NETDEV_TX_OK;
 }
@@ -467,8 +442,6 @@ static void chpt_eth_spi_netdev_setup(struct net_device *dev) {
 
     espi = netdev_priv(dev);
     memset(espi, 0, sizeof(*espi));
-    memset(&espi->txr, 0, sizeof(espi->txr));
-    espi->txr.count = TX_RING_MAX_LEN;
 };
 
 static const struct of_device_id chpt_eth_spi_of_match[] = {
