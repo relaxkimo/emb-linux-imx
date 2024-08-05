@@ -44,6 +44,7 @@ struct eth_spi_stats {
 	u64 reset_timeout;
 	u64 spi_err;
 	u64 ring_full;
+	u64 read_err;
 	u64 write_err;
 	u64 out_of_mem;
 };
@@ -244,7 +245,7 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi *espi)
 			eth_spi_init_frame(espi->tx_frame, 0, 0, 0);
 			if (chpt_eth_spi_transceive_frame(espi) == -1) {
 				netif_carrier_off(espi->net_dev);
-				espi->stats.write_err++;
+				espi->stats.read_err++;
 				return -1;
 			}
 		}
@@ -479,7 +480,60 @@ static const struct net_device_ops chpt_eth_spi_netdev_ops = {
 	.ndo_validate_addr = eth_validate_addr,
 };
 
-static const struct ethtool_ops chpt_eth_spi_ethtool_ops = {};
+/* The order of these strings must match the order of the fields in
+ * struct eth_spi_stats
+ */
+/* clang-format off */
+static const char eth_spi_gstrings_stats[][ETH_GSTRING_LEN] = {
+	"Reset timeouts",
+	"SPI errors",
+	"Transmit ring full",
+	"Read errors",
+	"Write errors",
+	"Out of memory",
+};
+/* clang-format on */
+
+static void chpt_eth_spi_get_ethtool_stats(struct net_device *dev,
+					   struct ethtool_stats *estats,
+					   u64 *data)
+{
+	struct chpt_eth_spi *espi = netdev_priv(dev);
+	struct eth_spi_stats *st = &espi->stats;
+
+	memcpy(data, st, ARRAY_SIZE(eth_spi_gstrings_stats) * sizeof(u64));
+}
+
+static void chpt_eth_spi_get_strings(struct net_device *dev, u32 stringset,
+				     u8 *buf)
+{
+	switch (stringset) {
+	case ETH_SS_STATS:
+		memcpy(buf, &eth_spi_gstrings_stats,
+		       sizeof(eth_spi_gstrings_stats));
+		break;
+	default:
+		WARN_ON(1);
+		break;
+	}
+}
+
+static int chpt_eth_spi_get_sset_count(struct net_device *dev, int sset)
+{
+	switch (sset) {
+	case ETH_SS_STATS:
+		return ARRAY_SIZE(eth_spi_gstrings_stats);
+	default:
+		return -EINVAL;
+	}
+}
+
+static const struct ethtool_ops chpt_eth_spi_ethtool_ops = {
+	.get_link = ethtool_op_get_link,
+	.get_ethtool_stats = chpt_eth_spi_get_ethtool_stats,
+	.get_strings = chpt_eth_spi_get_strings,
+	.get_sset_count = chpt_eth_spi_get_sset_count,
+};
 
 static void chpt_eth_spi_netdev_setup(struct net_device *dev)
 {
