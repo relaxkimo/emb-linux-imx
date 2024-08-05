@@ -6,6 +6,8 @@
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
+#include <linux/media-bus-format.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
@@ -86,7 +88,7 @@ static int ampire_panel_disable(struct drm_panel *panel)
 		err = mipi_dsi_dcs_set_display_off(ampire->link);
 		if (err < 0)
 			DRM_DEV_ERROR(panel->dev,
-						  "failed to set display off: %d\n", err);
+				      "failed to set display off: %d\n", err);
 	}
 
 	ampire->enabled = false;
@@ -106,7 +108,7 @@ static int ampire_panel_unprepare(struct drm_panel *panel)
 		err = mipi_dsi_dcs_enter_sleep_mode(ampire->link);
 		if (err < 0) {
 			DRM_DEV_ERROR(panel->dev,
-						  "failed to enter sleep mode: %d\n", err);
+				      "failed to enter sleep mode: %d\n", err);
 			return err;
 		}
 		msleep(120);
@@ -147,11 +149,13 @@ static int ampire_panel_prepare(struct drm_panel *panel)
 	if (ampire->i2c) {
 		// skip 1st entry which is for MIPI-DSI mode
 		for (i = 1; i < ARRAY_SIZE(init_code); i++) {
-			err = i2c_master_send(ampire->i2c, (const char *) &init_code[i],
-								  sizeof(struct ampire_panel_cmd));
+			err = i2c_master_send(ampire->i2c,
+					      (const char *) &init_code[i],
+					      sizeof(struct ampire_panel_cmd));
 			if (err < 0) {
 				DRM_DEV_ERROR(panel->dev,
-							  "failed write i2c init cmds: %d\n", err);
+					      "failed write i2c cmds: %d\n",
+					      err);
 				goto poweroff;
 			}
 		}
@@ -160,7 +164,8 @@ static int ampire_panel_prepare(struct drm_panel *panel)
 			err = mipi_dsi_generic_write(ampire->link, &init_code[i],
 						sizeof(struct ampire_panel_cmd));
 			if (err < 0) {
-				DRM_DEV_ERROR(panel->dev, "failed write init cmds: %d\n",
+				DRM_DEV_ERROR(panel->dev,
+					      "failed write dsi cmds: %d\n",
 					      err);
 				goto poweroff;
 			}
@@ -177,8 +182,10 @@ poweroff:
 	gpiod_set_value_cansleep(ampire->enable_gpio, 0);
 
 	regulator_err = regulator_disable(ampire->supply);
-	if (regulator_err) DRM_DEV_ERROR(panel->dev,
-						 "failed to disable regulator: %d\n", regulator_err);
+	if (regulator_err) {
+		DRM_DEV_ERROR(panel->dev,
+			      "disable regulator failed: %d\n", regulator_err);
+	}
 
 	return err;
 }
@@ -200,25 +207,50 @@ static int ampire_panel_enable(struct drm_panel *panel)
 		}
 	}
 
+	if (!ampire->i2c) {
+		ret = mipi_dsi_dcs_set_display_on(ampire->link);
+		if (ret < 0)
+			DRM_DEV_ERROR(panel->dev,
+				      "failed to set display on: %d\n", ret);
+	}
+
 	ampire->enabled = true;
 
 	return 0;
 }
 
+/*
+ * Panel AM-640480GBTNQW-16H
+ *   HS period - 800
+ *   HS first horizontal data time - 144
+ *   HS pulse width - 30
+ *
+ *   VS period - 525
+ *   VS pulse width - 3
+ *   VS-DEN time - 35
+ */
 static const struct drm_display_mode default_mode = {
 	.clock = 25175,
 	.hdisplay = 640,
 	.hsync_start = 640 + 16,
 	.hsync_end = 640 + 16 + 30,
-	.htotal = 640 + 16 + 30 + 114,
+	.htotal = 640 + 16 + 30 + 144,
 	.vdisplay = 480,
 	.vsync_start = 480 + 10,
 	.vsync_end = 480 + 10 + 3,
-	.vtotal = 480 + 10 + 3 + 32,
+	.vtotal = 480 + 10 + 3 + 35,
+	.width_mm = 117,
+	.height_mm = 92,
 	.flags = DRM_MODE_FLAG_PVSYNC | DRM_MODE_FLAG_PHSYNC,
 };
 
-static int ampire_panel_get_modes(struct drm_panel *panel, struct drm_connector *connector)
+/*
+ * DSI bridge chip is converting DSI to RGB666 - so, the format for
+ * the dsi bus is 4 lanes to the bridge. So, this won't match the
+ * pin wiring for the schematic and should be fixed later.
+ */
+static int ampire_panel_get_modes(struct drm_panel *panel,
+				  struct drm_connector *connector)
 {
 	struct drm_display_mode *mode;
 
@@ -231,9 +263,9 @@ static int ampire_panel_get_modes(struct drm_panel *panel, struct drm_connector 
 
 	drm_mode_set_name(mode);
 
-	connector->display_info.width_mm = 117;
-	connector->display_info.height_mm = 92;
-
+	connector->display_info.width_mm = mode->width_mm;
+	connector->display_info.height_mm = mode->height_mm;
+	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
 	drm_mode_probed_add(connector, mode);
 
 	return 1;
@@ -263,7 +295,7 @@ static int ampire_panel_add(struct ampire_panel *ampire)
 		return PTR_ERR(ampire->supply);
 
 	ampire->enable_gpio = devm_gpiod_get_optional(dev, "enable",
-							   GPIOD_OUT_HIGH);
+						      GPIOD_OUT_HIGH);
 	if (IS_ERR(ampire->enable_gpio)) {
 		err = PTR_ERR(ampire->enable_gpio);
 		dev_dbg(dev, "failed to get enable gpio: %d\n", err);
@@ -272,7 +304,8 @@ static int ampire_panel_add(struct ampire_panel *ampire)
 
 	ampire->backlight = devm_of_find_backlight(dev);
 
-	drm_panel_init(&ampire->base, &ampire->link->dev, &ampire_panel_funcs, DRM_MODE_CONNECTOR_DSI);
+	drm_panel_init(&ampire->base, &ampire->link->dev,
+		       &ampire_panel_funcs, DRM_MODE_CONNECTOR_DSI);
 
 	drm_panel_add(&ampire->base);
 	return 0;
@@ -291,8 +324,10 @@ static int ampire_panel_probe(struct mipi_dsi_device *dsi)
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO |
-		MIPI_DSI_MODE_VIDEO_SYNC_PULSE | MIPI_DSI_MODE_LPM;
+	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
+			  MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_NO_EOT_PACKET;
+	dsi->hs_rate = 500000000;
+	dsi->lp_rate = 16000000;
 
 	ampire = devm_kzalloc(&dsi->dev, sizeof(*ampire), GFP_KERNEL);
 	if (!ampire)
@@ -310,7 +345,6 @@ static int ampire_panel_probe(struct mipi_dsi_device *dsi)
 	if (err < 0)
 		return err;
 
-	//return mipi_dsi_attach(dsi);
 	err = mipi_dsi_attach(dsi);
 	if(err < 0)
 		ampire_panel_del(ampire);
