@@ -42,6 +42,8 @@ MODULE_PARM_DESC(eth_spi_clkspeed,
 
 struct eth_spi_stats {
 	u64 spi_err;
+	u64 ack_err;
+	u64 frag_err;
 	u64 ring_full;
 	u64 read_err;
 	u64 write_err;
@@ -77,6 +79,72 @@ struct chpt_eth_spi {
 	struct sk_buff *rx_skb;
 };
 
+static struct sk_buff *ethspi_process(struct net_device *net_dev,
+				      struct eth_spi_stats *stats,
+				      const struct eth_spi_frame *rx_frame,
+				      struct sk_buff *rx_skb)
+{
+	u16 frame_len = eth_spi_frame_len(rx_frame);
+	if (frame_len > 0) {
+		if (rx_frame->frag_idx == 0) {
+			// first fragment
+
+			if (rx_skb) {
+				netdev_warn(net_dev,
+					    "drop incomplete package\n");
+				stats->frag_err++;
+				kfree_skb(rx_skb);
+				rx_skb = NULL;
+			}
+			rx_skb = netdev_alloc_skb_ip_align(
+				net_dev,
+				(rx_frame->frag_tot + 1) * ETH_SPI_FRAG_LEN);
+			if (!rx_skb) {
+				stats->out_of_mem++;
+				netdev_warn(net_dev,
+					    "out of RX resources: no buffer\n");
+				return rx_skb;
+			}
+		}
+
+		if (rx_skb) {
+			if (skb_tailroom(rx_skb) < frame_len) {
+				netdev_warn(
+					net_dev,
+					"out of RX resources: buffer to small\n");
+				stats->out_of_mem++;
+				kfree_skb(rx_skb);
+				rx_skb = NULL;
+				return rx_skb;
+			};
+
+			if ((rx_frame->frag_idx * ETH_SPI_FRAG_LEN) !=
+			    rx_skb->len) {
+				netdev_warn(net_dev, "missed a fragment\n");
+				stats->frag_err++;
+				kfree_skb(rx_skb);
+				rx_skb = NULL;
+				return rx_skb;
+			}
+			skb_put_data(rx_skb, rx_frame->buf, frame_len);
+		}
+
+		if (rx_frame->frag_idx == rx_frame->frag_tot) {
+			// last frame
+			rx_skb->protocol = eth_type_trans(rx_skb, rx_skb->dev);
+			skb_checksum_none_assert(rx_skb);
+
+			net_dev->stats.rx_packets++;
+			net_dev->stats.rx_bytes += rx_skb->len;
+			netdev_dbg(net_dev, "Rx-ing packet: Size: %d\n",
+				   rx_skb->len);
+			netif_rx(rx_skb);
+			rx_skb = NULL;
+		}
+	}
+	return rx_skb;
+}
+
 static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi *espi)
 {
 	struct spi_message msg;
@@ -86,14 +154,20 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi *espi)
 		.len = sizeof(struct eth_spi_frame),
 	};
 	int ret;
+	bool slave_ack;
 
 	reinit_completion(&espi->slave_sync_comp);
 
 	gpiod_set_value(espi->slave_select, 1);
 	netdev_vdbg(espi->net_dev, "slave select: 1");
-	if (wait_for_completion_interruptible_timeout(
-		    &espi->slave_sync_comp, msecs_to_jiffies(100)) == 0) {
-		netdev_warn(espi->net_dev, "slave ack timeout");
+	slave_ack = wait_for_completion_interruptible_timeout(
+			    &espi->slave_sync_comp, msecs_to_jiffies(100)) > 0;
+	if (!slave_ack) {
+		if (netif_carrier_ok(espi->net_dev)) {
+			netdev_warn(espi->net_dev, "slave ack timeout");
+			netif_carrier_off(espi->net_dev);
+			espi->stats.ack_err++;
+		}
 	} else {
 		netdev_vdbg(espi->net_dev, "slave ready");
 	}
@@ -107,15 +181,23 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi *espi)
 	reinit_completion(&espi->slave_sync_comp);
 	ret = spi_sync(espi->spi_dev, &msg);
 	if (ret || (msg.actual_length != transfer.len)) {
+		eth_spi_reset_frame(espi->rx_frame);
 		netdev_err(espi->net_dev, "spi error %d\n", ret);
 		espi->stats.spi_err++;
 	}
 
-	if (wait_for_completion_interruptible_timeout(
-		    &espi->slave_sync_comp, msecs_to_jiffies(10)) == 0) {
-		netdev_warn(espi->net_dev, "slave ack timeout");
-	} else {
-		netdev_vdbg(espi->net_dev, "slave done");
+	if (slave_ack) {
+		if (wait_for_completion_interruptible_timeout(
+			    &espi->slave_sync_comp, msecs_to_jiffies(10)) ==
+		    0) {
+			if (netif_carrier_ok(espi->net_dev)) {
+				netdev_warn(espi->net_dev, "slave ack timeout");
+				netif_carrier_off(espi->net_dev);
+				espi->stats.ack_err++;
+			}
+		} else {
+			netdev_vdbg(espi->net_dev, "slave done");
+		}
 	}
 
 	gpiod_set_value(espi->slave_select, 0);
@@ -127,73 +209,24 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi *espi)
 		return -1;
 	}
 
-	if (eth_spi_frame_valid(espi->rx_frame)) {
-		netdev_dbg(espi->net_dev, "rx frame valid %d/%d (len=%d)",
-			   espi->rx_frame->frag_idx + 1,
-			   espi->rx_frame->frag_tot + 1,
-			   eth_spi_frame_len(espi->rx_frame));
-		if (eth_spi_frame_len(espi->rx_frame) > 0) {
-			if (espi->rx_frame->frag_idx == 0) {
-				// first fragment
-
-				if (espi->rx_skb) {
-					netdev_warn(
-						espi->net_dev,
-						"drop incomplete package\n");
-					kfree_skb(espi->rx_skb);
-					espi->rx_skb = NULL;
-				}
-				espi->rx_skb = netdev_alloc_skb_ip_align(
-					espi->net_dev,
-					(espi->rx_frame->frag_tot + 1) *
-						ETH_SPI_FRAG_LEN);
-				if (!espi->rx_skb) {
-					netdev_warn(
-						espi->net_dev,
-						"out of RX resources: no buffer\n");
-					espi->stats.out_of_mem++;
-					return -1;
-				}
+	if (slave_ack) {
+		if (eth_spi_frame_valid(espi->rx_frame)) {
+			if (!netif_carrier_ok(espi->net_dev)) {
+				netif_carrier_on(espi->net_dev);
 			}
+			netdev_dbg(espi->net_dev,
+				   "rx frame valid %d/%d (len=%d)",
+				   espi->rx_frame->frag_idx + 1,
+				   espi->rx_frame->frag_tot + 1,
+				   eth_spi_frame_len(espi->rx_frame));
 
-			if (espi->rx_skb) {
-				u16 frame_len =
-					eth_spi_frame_len(espi->rx_frame);
-				if (skb_tailroom(espi->rx_skb) < frame_len) {
-					netdev_warn(
-						espi->net_dev,
-						"out of RX resources: buffer to small\n");
-					kfree_skb(espi->rx_skb);
-					espi->rx_skb = NULL;
-					espi->stats.out_of_mem++;
-					return -1;
-				};
-				skb_put_data(espi->rx_skb, espi->rx_frame->buf,
-					     frame_len);
-			}
-
-			if (espi->rx_frame->frag_idx ==
-			    espi->rx_frame->frag_tot) {
-				struct net_device_stats *n_stats =
-					&espi->net_dev->stats;
-
-				// last frame
-				espi->rx_skb->protocol = eth_type_trans(
-					espi->rx_skb, espi->rx_skb->dev);
-				skb_checksum_none_assert(espi->rx_skb);
-
-				n_stats->rx_packets++;
-				n_stats->rx_bytes += espi->rx_skb->len;
-				netdev_dbg(espi->net_dev,
-					   "Rx-ing packet: Size: %d\n",
-					   espi->rx_skb->len);
-				netif_rx(espi->rx_skb);
-				espi->rx_skb = NULL;
-			}
+			espi->rx_skb =
+				ethspi_process(espi->net_dev, &espi->stats,
+					       espi->rx_frame, espi->rx_skb);
+		} else {
+			netdev_warn(espi->net_dev, "invalid frame");
+			return -1;
 		}
-	} else {
-		netdev_warn(espi->net_dev, "invalid frame");
-		return -1;
 	}
 
 	return 0;
@@ -443,6 +476,7 @@ static int chpt_eth_spi_netdev_init(struct net_device *dev)
 	dev->mtu = ETH_DATA_LEN;
 	dev->type = ARPHRD_ETHER;
 	espi->spi_thread = NULL;
+	espi->rx_skb = NULL;
 
 	memset(&espi->stats, 0, sizeof(struct eth_spi_stats));
 
@@ -455,8 +489,6 @@ static int chpt_eth_spi_netdev_init(struct net_device *dev)
 		kfree(espi->tx_frame);
 		return -ENOBUFS;
 	}
-
-	espi->rx_skb = NULL; // CHECK if allready null-ed
 
 	return 0;
 }
@@ -489,6 +521,8 @@ static const struct net_device_ops chpt_eth_spi_netdev_ops = {
 /* clang-format off */
 static const char eth_spi_gstrings_stats[][ETH_GSTRING_LEN] = {
 	"SPI errors",
+	"ACK errors",
+	"Fragmentation errors",
 	"Transmit ring full",
 	"Read errors",
 	"Write errors",
