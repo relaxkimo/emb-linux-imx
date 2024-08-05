@@ -28,7 +28,6 @@
 
 #include "eth_spi_protocol.h"
 
-
 #define ETH_SPI_DRV_NAME    "chpt-eth-spi"
 #define TX_RING_MAX_LEN     10
 #define TX_RING_MIN_LEN     2
@@ -92,11 +91,11 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi)
     reinit_completion(&espi->slave_sync_comp);
 
     gpiod_set_value(espi->slave_select, 1);
-    netdev_dbg(espi->net_dev, "slave select: 1");
+    netdev_vdbg(espi->net_dev, "slave select: 1");
     if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(100)) == 0) {
         netdev_warn(espi->net_dev, "slave ack timeout");
     } else {
-        netdev_dbg(espi->net_dev, "slave ready");
+        netdev_vdbg(espi->net_dev, "slave ready");
     }
 
     spi_message_init(&msg);
@@ -111,11 +110,11 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi)
     if (wait_for_completion_interruptible_timeout(&espi->slave_sync_comp, msecs_to_jiffies(10)) == 0) {
         netdev_warn(espi->net_dev, "slave ack timeout");
     } else {
-        netdev_dbg(espi->net_dev, "slave done");
+        netdev_vdbg(espi->net_dev, "slave done");
     }
 
     gpiod_set_value(espi->slave_select, 0);
-    netdev_dbg(espi->net_dev, "slave select: 0");
+    netdev_vdbg(espi->net_dev, "slave select: 0");
     usleep_range(20, 100);
 
     if (ret) {
@@ -128,36 +127,49 @@ static int chpt_eth_spi_transceive_frame(struct chpt_eth_spi* espi)
             espi->rx_frame->frag_idx+1,
             espi->rx_frame->frag_tot+1,
             eth_spi_frame_len(espi->rx_frame));
-        if (espi->rx_frame->frag_idx == 0) {
-            // first frame
-            espi->rx_skb = netdev_alloc_skb_ip_align(espi->net_dev, (espi->rx_frame->frag_tot + 1) * ETH_SPI_FRAG_LEN);
-            if (!espi->rx_skb) {
-                netdev_dbg(espi->net_dev, "out of RX resources\n");
-                espi->stats.out_of_mem++;
-                return -1;
+        if (eth_spi_frame_len(espi->rx_frame) > 0) {
+            if (espi->rx_frame->frag_idx == 0) {
+                // first fragment
+
+                if (espi->rx_skb) {
+                    netdev_warn(espi->net_dev, "drop incomplete package\n");
+                    kfree_skb(espi->rx_skb);
+                    espi->rx_skb = NULL;
+                }
+                espi->rx_skb = netdev_alloc_skb_ip_align(espi->net_dev, (espi->rx_frame->frag_tot + 1) * ETH_SPI_FRAG_LEN);
+                if (!espi->rx_skb) {
+                    netdev_warn(espi->net_dev, "out of RX resources: no buffer\n");
+                    espi->stats.out_of_mem++;
+                    return -1;
+                }
+            }
+
+            if (espi->rx_skb) {
+                u16 frame_len = eth_spi_frame_len(espi->rx_frame);
+                if (skb_tailroom(espi->rx_skb) < frame_len) {
+                    netdev_warn(espi->net_dev, "out of RX resources: buffer to small\n");
+                    kfree_skb(espi->rx_skb);
+                    espi->rx_skb = NULL;
+                    espi->stats.out_of_mem++;
+                    return -1;
+                };
+                skb_put_data(espi->rx_skb, espi->rx_frame->buf, frame_len);
+            }
+
+            if (espi->rx_frame->frag_idx == espi->rx_frame->frag_tot) {
+                struct net_device_stats *n_stats = &espi->net_dev->stats;
+
+                // last frame
+                espi->rx_skb->protocol = eth_type_trans(espi->rx_skb, espi->rx_skb->dev);
+                skb_checksum_none_assert(espi->rx_skb);
+
+                n_stats->rx_packets++;
+                n_stats->rx_bytes += espi->rx_skb->len;
+                netdev_dbg(espi->net_dev, "Rx-ing packet: Size: %d\n", espi->rx_skb->len);
+                netif_rx(espi->rx_skb);
+                espi->rx_skb = NULL;
             }
         }
-
-        if (espi->rx_skb) {
-            u16 frame_len = eth_spi_frame_len(espi->rx_frame);
-
-            if (skb_tailroom(espi->rx_skb) < frame_len) {
-                netdev_dbg(espi->net_dev, "out of RX resources\n");
-                // TODO free rx_skb
-                espi->stats.out_of_mem++;
-                return -1;
-            };
-            skb_put_data(espi->rx_skb, espi->rx_frame->buf, frame_len);
-        }
-
-        if (espi->rx_frame->frag_idx == espi->rx_frame->frag_tot) {
-            // last frame
-            espi->rx_skb->protocol = eth_type_trans(espi->rx_skb, espi->rx_skb->dev);
-            skb_checksum_none_assert(espi->rx_skb);
-            netif_rx(espi->rx_skb);
-            espi->rx_skb = NULL;
-        }
-
     } else {
         netdev_warn(espi->net_dev, "invalid frame");
         return -1;
@@ -184,7 +196,7 @@ static int chpt_eth_spi_transceive(struct chpt_eth_spi* espi)
                 u16 len = min(128u, (skb->len - (frag_idx * ETH_SPI_FRAG_LEN)));
                 memcpy(espi->tx_frame->buf, &skb->data[frag_idx * ETH_SPI_FRAG_LEN], len);
                 eth_spi_init_frame(espi->tx_frame, frag_idx, frag_tot - 1, len);
-                netdev_info(espi->net_dev, "tx frame %d/%d (len=%d)", frag_idx + 1, frag_tot, len);
+                netdev_dbg(espi->net_dev, "tx frame %d/%d (len=%d)", frag_idx + 1, frag_tot, len);
                 if (chpt_eth_spi_transceive_frame(espi) == -1) {
                     espi->stats.write_err++;
                     return -1;
@@ -383,7 +395,7 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_devi
     u16 new_tail;
 
     struct chpt_eth_spi* espi = netdev_priv(dev);
-    netdev_dbg(espi->net_dev, "netdev_xmit");
+    netdev_vdbg(espi->net_dev, "netdev_xmit");
 
     if(espi->txr.skb[espi->txr.tail]) {
         netdev_warn(espi->net_dev, "queue was unexpectedly full!\n");
@@ -392,7 +404,7 @@ static netdev_tx_t chpt_eth_spi_netdev_xmit(struct sk_buff* skb, struct net_devi
         return NETDEV_TX_BUSY;
     }
 
-    netdev_dbg(espi->net_dev, "Tx-ing packet: Size: 0x%08x\n", skb->len);
+    netdev_dbg(espi->net_dev, "Tx-ing packet: Size: %d\n", skb->len);
 
     new_tail = espi->txr.tail + 1;
     if(new_tail >= espi->txr.count)
