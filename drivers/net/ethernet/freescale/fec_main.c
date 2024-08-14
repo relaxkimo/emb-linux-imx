@@ -4262,6 +4262,7 @@ fec_probe(struct platform_device *pdev)
 	struct net_device *ndev;
 	int i, irq, ret = 0;
 	const struct of_device_id *of_id;
+	int id, min_id;
 	static int dev_id;
 	struct device_node *np = pdev->dev.of_node, *phy_node;
 	int num_tx_qs;
@@ -4309,8 +4310,18 @@ fec_probe(struct platform_device *pdev)
 		goto failed_ioremap;
 	}
 
+	/* try to get the id from aliases */
+	min_id = of_alias_get_highest_id("ethernet");
+	if (min_id < 0)
+		min_id = 0; /* no aliases - so start at zero */
+	else
+		min_id += 1; /* start at highest alias plus one */
+	id = of_alias_get_id(np, "ethernet");
+	if (id < 0)
+		fep->dev_id = min_id + dev_id++;
+	else
+		fep->dev_id = id;
 	fep->pdev = pdev;
-	fep->dev_id = dev_id++;
 
 	platform_set_drvdata(pdev, ndev);
 
