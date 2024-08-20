@@ -112,7 +112,7 @@
 #define PIN_IO_TS_DIS		0		/* disabled; input can be left floating */
 #define PIN_IO_TS_INTB		BIT(2)		/* ^INTB output; push-pull */
 #define PIN_IO_TS_CLK		BIT(3)		/* CLK output; push-pull */
-#define PIN_IO_TS_INPUT	BIT(2) | BIT(3) /* input mode */
+#define PIN_IO_TS_INPUT	(BIT(2) | BIT(3)) /* input mode */
 
 #define PIN_IO_TSIM		BIT(4)
 #define PIN_IO_TS_CMOS		0		/* CMOS input; ref Vdd; disabled on Vbatt */
@@ -140,9 +140,7 @@ struct pcf85x63_config {
 	unsigned int num_nvram;
 };
 
-
 /* tamper timestamp interface */
-
 static ssize_t timestamp0_store(struct device *dev,
 				struct device_attribute *attr,
 				const char *buf, size_t count)
@@ -158,14 +156,14 @@ static ssize_t timestamp0_show(struct device *dev,
 			       struct device_attribute *attr, char *buf)
 {
 	struct pcf85363 *pcf85363 = dev_get_drvdata(dev->parent);
-	static time64_t timestamp0 = 0;
+	static time64_t timestamp0;
 	unsigned char ts[DT_TS_YEARS + 1];
 	struct rtc_time tm  = { 0 };
 	int ret;
 
 	ret = regmap_bulk_read(pcf85363->regmap, DT_TIMESTAMP1, ts, sizeof(ts));
 	if (ret)
-	    return ret;
+		return ret;
 
 	ts[DT_TS_SECS] &= 0x7F;
 	tm.tm_sec = bcd2bin(ts[DT_TS_SECS]);
@@ -500,44 +498,42 @@ static int pcf85363_probe(struct i2c_client *client)
 						NULL, pcf85363_rtc_handle_irq,
 						IRQF_TRIGGER_LOW | IRQF_ONESHOT,
 						"pcf85363", client);
-		if (ret == 0) {
-			set_bit(RTC_FEATURE_ALARM, pcf85363->rtc->features);
-			if (of_find_property(client->dev.of_node,
-					     "tamper-detect", NULL) != NULL) {
-
-				/* active-high mechanical switch input (should configure from DT) */
-				ret = regmap_update_bits(pcf85363->regmap, CTRL_PIN_IO,
-							 PIN_IO_TSPM     | PIN_IO_TSIM    | PIN_IO_TSL,
-							 PIN_IO_TS_INPUT | PIN_IO_TS_MECH | PIN_IO_TS_ACTIVEH);
-				if (ret)
-					return ret;
-
-				/* every timestamp update (should configure from DT) */
-				ret = regmap_update_bits(pcf85363->regmap, DT_TS_MODE,
-									 0xFF, 0x02);
-				if (ret)
-					return ret;
-
-				/* enable timestamp interrupt */
-				ret = regmap_update_bits(pcf85363->regmap, CTRL_INTA_EN,
-									 INT_TSRIE, INT_TSRIE);
-				if (ret)
-					return ret;
-
-				ret = rtc_add_group(pcf85363->rtc, &pcf85363_attr_group);
-				if (ret)
-				    return ret;
-
-				dev_info(&client->dev, "tamper enabled\n");
-			}
-
-		} else {
-			dev_warn(&client->dev, "unable to request IRQ, alarms disabled\n");
+		if (ret) {
+			dev_err(&client->dev, "unable to request alarm IRQ\n");
+			return ret;
 		}
+	}
 
+	if (client->irq > 0 || device_property_read_bool(&client->dev, "tamper-detect")) {
+		set_bit(RTC_FEATURE_ALARM, pcf85363->rtc->features);
+
+		/* enable timestamp interrupt */
+		ret = regmap_update_bits(pcf85363->regmap, CTRL_INTA_EN,
+								 INT_TSRIE, INT_TSRIE);
 		if (ret)
 			return ret;
+	} else {
+		dev_warn(&client->dev, "unable to request irq, alarms disabled\n");
 	}
+
+	/* active-high mechanical switch input (should configure from DT) */
+	ret = regmap_update_bits(pcf85363->regmap, CTRL_PIN_IO,
+							 PIN_IO_TSPM     | PIN_IO_TSIM    | PIN_IO_TSL,
+							 PIN_IO_TS_INPUT | PIN_IO_TS_MECH | PIN_IO_TS_ACTIVEH);
+	if (ret)
+		return ret;
+
+	/* every timestamp update (should configure from DT) */
+	ret = regmap_update_bits(pcf85363->regmap, DT_TS_MODE,
+							 0xFF, 0x02);
+	if (ret)
+		return ret;
+
+	ret = rtc_add_group(pcf85363->rtc, &pcf85363_attr_group);
+	if (ret)
+		return ret;
+
+	dev_info(&client->dev, "tamper detection enabled\n");
 
 	ret = devm_rtc_register_device(pcf85363->rtc);
 
