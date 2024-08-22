@@ -308,7 +308,7 @@
 &edma3 {
 	status = "okay";
 };
-
+/*
 &eqos {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_eqos>;
@@ -341,12 +341,26 @@
 		};
 	};
 };
+*/
+&eqos {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_eqos>;
+	phy-mode = "rgmii";
+	status = "okay";
+
+    fixed-link {
+		speed = <1000>;
+		full-duplex;
+	};
+	
+};
 
 /*
  * fec1 shares the some PINs with usdhc2.
  * by default usdhc2 is enabled in this dts.
  * Please disable usdhc2 to enable fec1
  */
+/*
 &fec1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_fec1>;
@@ -377,12 +391,121 @@
 		};
 	};
 };
+*/
+&fec1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_fec1>, <&pinctrl_fec1_mdio>, <&pinctrl_fec1_phy_reset>;
+
+	phy-mode = "rgmii";
+	fsl,magic-packet;
+	status = "okay";
+
+    fixed-link {
+        speed = <1000>;
+        full-duplex;
+    };
+
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		switch@29 {
+            compatible = "realtek,rtl8370mb";
+            reg = <29>;
+            reset-gpios = <&lsio_gpio3 20 GPIO_ACTIVE_LOW>;
+            realtek,disable-leds;
+		    dsa,member = <0 0>;
+
+            switch_intc3: interrupt-controller {
+                interrupt-parent = <&lsio_gpio4>;
+                interrupts = <20 IRQ_TYPE_EDGE_FALLING>;
+                interrupt-controller;
+                #address-cells = <0>;
+                #interrupt-cells = <1>;
+            };
+            ports {
+                #address-cells = <1>;
+                #size-cells = <0>;
+
+                port@0 {
+                        reg = <0>;
+                        label = "lan0";
+                };
+
+                port@1 {
+                        reg = <1>;
+                        label = "lan1";
+                };
+
+                port@2 {
+                        reg = <2>;
+                        label = "lan2";
+                };
+
+                port@3 {
+                        reg = <3>;
+                        label = "lan3";
+                };
+
+                port@4 {
+                        reg = <4>;
+                        label = "lan4";
+                };
+
+                port@5 {
+                        reg = <5>;
+                        label = "lan5";
+                };
+
+                port@6 {
+                        reg = <6>;
+                        label = "lan6";
+                };
+
+                port@7 {
+                        reg = <7>;
+                        label = "lan7";
+                };
+
+                port@16 {
+                        reg = <16>;
+                        ethernet = <&eqos>;
+                        label = "cpu";
+                        phy-mode = "rgmii";
+                        tx-internal-delay-ps = <2000>;
+                        rx-internal-delay-ps = <1200>;
+
+                        fixed-link {
+                                speed = <1000>;
+                                full-duplex;
+                        };
+                };
+				
+                port@17 {
+                        reg = <17>;
+                        ethernet = <&fec1>;
+                        label = "cpu";
+                        phy-mode = "rgmii";
+                        tx-internal-delay-ps = <2000>;
+                        rx-internal-delay-ps = <1200>;
+
+                        fixed-link {
+                                speed = <1000>;
+                                full-duplex;
+                        };
+                };
+				
+            };
+        };
+	};
+
+};
 
 &flexspi0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_flexspi0>;
 	nxp,fspi-dll-slvdly = <4>;
-	status = "okay";
+	status = "disabled";
 
 	mt35xu512aba0: flash@0 {
 		reg = <0>;
@@ -644,6 +767,10 @@
 	status = "okay";
 };
 
+&lsio_gpio3 {
+	status = "okay";
+};
+
 &lsio_gpio4 {
 	status = "okay";
 };
@@ -804,7 +931,7 @@
 	cd-gpios = <&lsio_gpio5 1 GPIO_ACTIVE_LOW>;
 	wp-gpios = <&lsio_gpio5 0 GPIO_ACTIVE_HIGH>;
 	max-frequency = <100000000>;
-	status = "okay";
+	status = "disabled";
 };
 
 &iomuxc {
@@ -834,8 +961,8 @@
 
 	pinctrl_eqos: eqosgrp {
 		fsl,pins = <
-			IMX8DXL_ENET0_MDC_CONN_EQOS_MDC				0x06000020
-			IMX8DXL_ENET0_MDIO_CONN_EQOS_MDIO			0x06000020
+			/*IMX8DXL_ENET0_MDC_CONN_EQOS_MDC				    0x06000020*/
+			/*IMX8DXL_ENET0_MDIO_CONN_EQOS_MDIO			    	0x06000020*/
 			IMX8DXL_ENET1_RGMII_RXC_CONN_EQOS_RGMII_RXC		0x06000020
 			IMX8DXL_ENET1_RGMII_RXD0_CONN_EQOS_RGMII_RXD0		0x06000020
 			IMX8DXL_ENET1_RGMII_RXD1_CONN_EQOS_RGMII_RXD1		0x06000020
@@ -884,24 +1011,36 @@
 		>;
 	};
 
+    pinctrl_fec1_phy_reset: fec1phyresetgrp {
+		fsl,pins = <
+            IMX8DXL_QSPI0B_DATA2_LSIO_GPIO3_IO20			    0x20000020 /* PHY_RSTn */
+            IMX8DXL_USDHC1_VSELECT_LSIO_GPIO4_IO20              0x24000020 /* PHY_INTn */
+		>;
+	};
+
+	    pinctrl_fec1_mdio: fec1mdiogrp {
+		fsl,pins = <
+			IMX8DXL_ENET0_MDC_CONN_ENET0_MDC					0x06000020
+			IMX8DXL_ENET0_MDIO_CONN_ENET0_MDIO					0x06000020
+		>;
+	};
+
 	pinctrl_fec1: fec1grp {
 		fsl,pins = <
 			IMX8DXL_COMP_CTL_GPIO_1V8_3V3_ENET_ENETB0_PAD		0x000014a0
 			IMX8DXL_COMP_CTL_GPIO_1V8_3V3_ENET_ENETB1_PAD		0x000014a0
-			IMX8DXL_ENET0_MDC_CONN_ENET0_MDC			0x06000020
-			IMX8DXL_ENET0_MDIO_CONN_ENET0_MDIO			0x06000020
-			IMX8DXL_ENET0_RGMII_RXC_CONN_ENET0_RGMII_RXC		0x00000060
-			IMX8DXL_ENET0_RGMII_RXD0_CONN_ENET0_RGMII_RXD0		0x00000060
-			IMX8DXL_ENET0_RGMII_RXD1_CONN_ENET0_RGMII_RXD1		0x00000060
-			IMX8DXL_ENET0_RGMII_RXD2_CONN_ENET0_RGMII_RXD2		0x00000060
-			IMX8DXL_ENET0_RGMII_RXD3_CONN_ENET0_RGMII_RXD3		0x00000060
-			IMX8DXL_ENET0_RGMII_RX_CTL_CONN_ENET0_RGMII_RX_CTL	0x00000060
-			IMX8DXL_ENET0_RGMII_TXC_CONN_ENET0_RGMII_TXC		0x00000060
-			IMX8DXL_ENET0_RGMII_TXD0_CONN_ENET0_RGMII_TXD0		0x00000060
-			IMX8DXL_ENET0_RGMII_TXD1_CONN_ENET0_RGMII_TXD1		0x00000060
-			IMX8DXL_ENET0_RGMII_TXD2_CONN_ENET0_RGMII_TXD2		0x00000060
-			IMX8DXL_ENET0_RGMII_TXD3_CONN_ENET0_RGMII_TXD3		0x00000060
-			IMX8DXL_ENET0_RGMII_TX_CTL_CONN_ENET0_RGMII_TX_CTL	0x00000060
+            IMX8DXL_ENET0_RGMII_TXC_CONN_ENET0_RGMII_TXC		0x00000040
+			IMX8DXL_ENET0_RGMII_TXD0_CONN_ENET0_RGMII_TXD0		0x00000040
+			IMX8DXL_ENET0_RGMII_TXD1_CONN_ENET0_RGMII_TXD1		0x00000040
+			IMX8DXL_ENET0_RGMII_TXD2_CONN_ENET0_RGMII_TXD2		0x00000040
+			IMX8DXL_ENET0_RGMII_TXD3_CONN_ENET0_RGMII_TXD3		0x00000040
+			IMX8DXL_ENET0_RGMII_TX_CTL_CONN_ENET0_RGMII_TX_CTL 	0x00000040
+			IMX8DXL_ENET0_RGMII_RXC_CONN_ENET0_RGMII_RXC		0x00000040
+			IMX8DXL_ENET0_RGMII_RXD0_CONN_ENET0_RGMII_RXD0		0x00000040
+			IMX8DXL_ENET0_RGMII_RXD1_CONN_ENET0_RGMII_RXD1		0x00000040
+			IMX8DXL_ENET0_RGMII_RXD2_CONN_ENET0_RGMII_RXD2		0x00000040
+			IMX8DXL_ENET0_RGMII_RXD3_CONN_ENET0_RGMII_RXD3		0x00000040
+			IMX8DXL_ENET0_RGMII_RX_CTL_CONN_ENET0_RGMII_RX_CTL 	0x00000040
 		>;
 	};
 

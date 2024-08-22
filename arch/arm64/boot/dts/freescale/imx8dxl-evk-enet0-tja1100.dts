@@ -5,9 +5,9 @@
 
 #include "imx8dxl-evk-enet0.dts"
 
-&ethphy1 {
+/*&ethphy1 {
 	status = "disabled";
-};
+};*/
 
 &fec1 {
 	pinctrl-0 = <&pinctrl_fec1_rmii>;
