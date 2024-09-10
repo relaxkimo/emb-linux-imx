@@ -394,8 +394,9 @@
 */
 &fec1 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&pinctrl_fec1>, <&pinctrl_fec1_mdio>, <&pinctrl_fec1_phy_reset>;
-
+	pinctrl-0 = <&pinctrl_fec1>, <&pinctrl_fec1_mdio>, <&pinctrl_fec1_phy_reset>, <&pinctrl_externel_phy_reset>;
+/* Config fot PMC1.0 rtl8370 switch 2 rgmii ports.*/
+/*
 	phy-mode = "rgmii";
 	fsl,magic-packet;
 	status = "okay";
@@ -404,10 +405,30 @@
         speed = <1000>;
         full-duplex;
     };
+*/
+	phy-mode = "rgmii-id";
+	phy-handle = <&ethphy0>;
+	fsl,magic-packet;
+	nvmem-cells = <&fec_mac0>;
+	nvmem-cell-names = "mac-address";
+	phy-reset-gpios = <&lsio_gpio5 9 GPIO_ACTIVE_LOW>;
+	phy-reset-duration = <10>;
+	phy-reset-post-delay = <150>;
+	assigned-clocks = <&clk IMX_SC_R_ENET_0 IMX_SC_C_CLKDIV>;
+	assigned-clock-rates = <12000000>;
+	status = "okay";
 
 	mdio {
 		#address-cells = <1>;
 		#size-cells = <0>;
+
+		/* Realtek RTL8211F (0x001cc916) */
+		ethphy0: ethernet-phy@1 {
+			compatible = "ethernet-phy-ieee802.3-c22";
+			reg = <1>;
+			max-speed = <1000>;
+		};
+
 
 		switch@29 {
             compatible = "realtek,rtl8370mb";
@@ -467,8 +488,8 @@
                         label = "lan7";
                 };
 
-                port@16 {
-                        reg = <16>;
+                port@17 {
+                        reg = <17>;
                         ethernet = <&eqos>;
                         label = "cpu";
                         phy-mode = "rgmii";
@@ -480,21 +501,6 @@
                                 full-duplex;
                         };
                 };
-				
-                port@17 {
-                        reg = <17>;
-                        ethernet = <&fec1>;
-                        label = "cpu";
-                        phy-mode = "rgmii";
-                        tx-internal-delay-ps = <2000>;
-                        rx-internal-delay-ps = <1200>;
-
-                        fixed-link {
-                                speed = <1000>;
-                                full-duplex;
-                        };
-                };
-				
             };
         };
 	};
@@ -956,6 +962,12 @@
 	pinctrl_usbotg2: usbotg2grp {
 		fsl,pins = <
 			IMX8DXL_USB_SS3_TC1_CONN_USB_OTG2_PWR		0x00000021
+		>;
+	};
+
+    pinctrl_externel_phy_reset: externelphyresetgrp {
+		fsl,pins = <
+            IMX8DXL_ENET0_REFCLK_125M_25M_LSIO_GPIO5_IO09       0x20000020 /* ENET0_RSTn */
 		>;
 	};
 
